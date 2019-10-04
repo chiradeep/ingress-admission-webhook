@@ -10,8 +10,8 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/api/admission/v1beta1"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -22,9 +22,6 @@ var (
 	runtimeScheme = runtime.NewScheme()
 	codecs        = serializer.NewCodecFactory(runtimeScheme)
 	deserializer  = codecs.UniversalDeserializer()
-
-	// (https://github.com/kubernetes/kubernetes/issues/57982)
-	defaulter = runtime.ObjectDefaulter(runtimeScheme)
 )
 
 var (
@@ -32,21 +29,13 @@ var (
 		metav1.NamespaceSystem,
 		metav1.NamespacePublic,
 	}
-	requiredLabels = []string{
-		nameLabel,
-		instanceLabel,
-		versionLabel,
-		componentLabel,
-		partOfLabel,
-		managedByLabel,
+	ingressClassToInsecurePortMap = map[string]string{
+		"class1": "81",
+		"class2": "82",
 	}
-	addLabels = map[string]string{
-		nameLabel:      NA,
-		instanceLabel:  NA,
-		versionLabel:   NA,
-		componentLabel: NA,
-		partOfLabel:    NA,
-		managedByLabel: NA,
+	ingressClassToSecurePortMap = map[string]string{
+		"class1": "4443",
+		"class2": "4444",
 	}
 )
 
@@ -54,15 +43,6 @@ const (
 	admissionWebhookAnnotationValidateKey = "admission-webhook-example.banzaicloud.com/validate"
 	admissionWebhookAnnotationMutateKey   = "admission-webhook-example.banzaicloud.com/mutate"
 	admissionWebhookAnnotationStatusKey   = "admission-webhook-example.banzaicloud.com/status"
-
-	nameLabel      = "app.kubernetes.io/name"
-	instanceLabel  = "app.kubernetes.io/instance"
-	versionLabel   = "app.kubernetes.io/version"
-	componentLabel = "app.kubernetes.io/component"
-	partOfLabel    = "app.kubernetes.io/part-of"
-	managedByLabel = "app.kubernetes.io/managed-by"
-
-	NA = "not_available"
 )
 
 type WebhookServer struct {
@@ -99,20 +79,7 @@ func admissionRequired(ignoredList []string, admissionAnnotationKey string, meta
 			return false
 		}
 	}
-
-	annotations := metadata.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-
-	var required bool
-	switch strings.ToLower(annotations[admissionAnnotationKey]) {
-	default:
-		required = true
-	case "n", "no", "false", "off":
-		required = false
-	}
-	return required
+	return true
 }
 
 func mutationRequired(ignoredList []string, metadata *metav1.ObjectMeta) bool {
@@ -137,49 +104,38 @@ func validationRequired(ignoredList []string, metadata *metav1.ObjectMeta) bool 
 	return required
 }
 
-func updateAnnotation(target map[string]string, added map[string]string) (patch []patchOperation) {
-	for key, value := range added {
-		if target == nil || target[key] == "" {
-			target = map[string]string{}
-			patch = append(patch, patchOperation{
-				Op:   "add",
-				Path: "/metadata/annotations",
-				Value: map[string]string{
-					key: value,
-				},
-			})
-		} else {
-			patch = append(patch, patchOperation{
-				Op:    "replace",
-				Path:  "/metadata/annotations/" + key,
-				Value: value,
-			})
+func updateAnnotation(annotations map[string]string) (patch []patchOperation) {
+	for ann, val := range annotations {
+		if strings.Compare(strings.ToLower(ann), "kubernetes.io/ingress.class") == 0 {
+			if securePort, ok := ingressClassToSecurePortMap[strings.ToLower(val)]; ok {
+				patch = append(patch, patchOperation{
+					Op:   "add",
+					Path: "/metadata/annotations",
+					Value: map[string]string{
+						"ingress.citrix.com/secure-port": securePort,
+					},
+				})
+			}
+			if insecurePort, ok := ingressClassToInsecurePortMap[strings.ToLower(val)]; ok {
+				patch = append(patch, patchOperation{
+					Op:   "add",
+					Path: "/metadata/annotations",
+					Value: map[string]string{
+						"ingress.citrix.com/insecure-port": insecurePort,
+					},
+				})
+			}
+			break
 		}
 	}
+
 	return patch
 }
 
-func updateLabels(target map[string]string, added map[string]string) (patch []patchOperation) {
-	values := make(map[string]string)
-	for key, value := range added {
-		if target == nil || target[key] == "" {
-			values[key] = value
-		}
-	}
-	patch = append(patch, patchOperation{
-		Op:    "add",
-		Path:  "/metadata/labels",
-		Value: values,
-	})
-	return patch
-}
-
-func createPatch(availableAnnotations map[string]string, annotations map[string]string, availableLabels map[string]string, labels map[string]string) ([]byte, error) {
+func createPatch(availableAnnotations map[string]string) ([]byte, error) {
 	var patch []patchOperation
 
-	patch = append(patch, updateAnnotation(availableAnnotations, annotations)...)
-	patch = append(patch, updateLabels(availableLabels, labels)...)
-
+	patch = append(patch, updateAnnotation(availableAnnotations)...)
 	return json.Marshal(patch)
 }
 
@@ -187,7 +143,6 @@ func createPatch(availableAnnotations map[string]string, annotations map[string]
 func (whsvr *WebhookServer) validate(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 	req := ar.Request
 	var (
-		availableLabels                 map[string]string
 		objectMeta                      *metav1.ObjectMeta
 		resourceNamespace, resourceName string
 	)
@@ -196,9 +151,9 @@ func (whsvr *WebhookServer) validate(ar *v1beta1.AdmissionReview) *v1beta1.Admis
 		req.Kind, req.Namespace, req.Name, resourceName, req.UID, req.Operation, req.UserInfo)
 
 	switch req.Kind.Kind {
-	case "Deployment":
-		var deployment appsv1.Deployment
-		if err := json.Unmarshal(req.Object.Raw, &deployment); err != nil {
+	case "Ingress":
+		var ingress networkingv1beta1.Ingress
+		if err := json.Unmarshal(req.Object.Raw, &ingress); err != nil {
 			glog.Errorf("Could not unmarshal raw object: %v", err)
 			return &v1beta1.AdmissionResponse{
 				Result: &metav1.Status{
@@ -206,20 +161,7 @@ func (whsvr *WebhookServer) validate(ar *v1beta1.AdmissionReview) *v1beta1.Admis
 				},
 			}
 		}
-		resourceName, resourceNamespace, objectMeta = deployment.Name, deployment.Namespace, &deployment.ObjectMeta
-		availableLabels = deployment.Labels
-	case "Service":
-		var service corev1.Service
-		if err := json.Unmarshal(req.Object.Raw, &service); err != nil {
-			glog.Errorf("Could not unmarshal raw object: %v", err)
-			return &v1beta1.AdmissionResponse{
-				Result: &metav1.Status{
-					Message: err.Error(),
-				},
-			}
-		}
-		resourceName, resourceNamespace, objectMeta = service.Name, service.Namespace, &service.ObjectMeta
-		availableLabels = service.Labels
+		resourceName, resourceNamespace, objectMeta = ingress.Name, ingress.Namespace, &ingress.ObjectMeta
 	}
 
 	if !validationRequired(ignoredNamespaces, objectMeta) {
@@ -231,15 +173,41 @@ func (whsvr *WebhookServer) validate(ar *v1beta1.AdmissionReview) *v1beta1.Admis
 
 	allowed := true
 	var result *metav1.Status
-	glog.Info("available labels:", availableLabels)
-	glog.Info("required labels", requiredLabels)
-	for _, rl := range requiredLabels {
-		if _, ok := availableLabels[rl]; !ok {
-			allowed = false
-			result = &metav1.Status{
-				Reason: "required labels are not set",
+
+	annotations := objectMeta.GetAnnotations()
+	foundIngressClass := false
+	for ann, val := range annotations {
+		if strings.Compare(strings.ToLower(ann), "kubernetes.io/ingress.class") == 0 {
+			foundIngressClass = true
+			if _, ok := ingressClassToInsecurePortMap[strings.ToLower(val)]; ok {
+				break
+			} else if _, ok := ingressClassToSecurePortMap[strings.ToLower(val)]; ok {
+				break
+			} else {
+				allowed = false
+				result = &metav1.Status{
+					Reason: "Specified ingress class not found",
+				}
+				break
 			}
-			break
+		}
+	}
+	if foundIngressClass && allowed {
+		for ann := range annotations {
+			if strings.Compare(strings.ToLower(ann), "ingress.citrix.com/secure-port") == 0 {
+				allowed = false
+				result = &metav1.Status{
+					Reason: "Secure port specified when ingress class is specified",
+				}
+				break
+			}
+			if strings.Compare(strings.ToLower(ann), "ingress.citrix.com/insecure-port") == 0 {
+				allowed = false
+				result = &metav1.Status{
+					Reason: "Insecure port specified when ingress class is specified",
+				}
+				break
+			}
 		}
 	}
 
@@ -253,18 +221,17 @@ func (whsvr *WebhookServer) validate(ar *v1beta1.AdmissionReview) *v1beta1.Admis
 func (whsvr *WebhookServer) mutate(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 	req := ar.Request
 	var (
-		availableLabels, availableAnnotations map[string]string
-		objectMeta                            *metav1.ObjectMeta
-		resourceNamespace, resourceName       string
+		objectMeta                      *metav1.ObjectMeta
+		resourceNamespace, resourceName string
 	)
 
-	glog.Infof("AdmissionReview for Kind=%v, Namespace=%v Name=%v (%v) UID=%v patchOperation=%v UserInfo=%v",
+	glog.Infof("Mutating AdmissionReview for Kind=%v, Namespace=%v Name=%v (%v) UID=%v patchOperation=%v UserInfo=%v",
 		req.Kind, req.Namespace, req.Name, resourceName, req.UID, req.Operation, req.UserInfo)
 
 	switch req.Kind.Kind {
-	case "Deployment":
-		var deployment appsv1.Deployment
-		if err := json.Unmarshal(req.Object.Raw, &deployment); err != nil {
+	case "Ingress":
+		var ingress networkingv1beta1.Ingress
+		if err := json.Unmarshal(req.Object.Raw, &ingress); err != nil {
 			glog.Errorf("Could not unmarshal raw object: %v", err)
 			return &v1beta1.AdmissionResponse{
 				Result: &metav1.Status{
@@ -272,20 +239,8 @@ func (whsvr *WebhookServer) mutate(ar *v1beta1.AdmissionReview) *v1beta1.Admissi
 				},
 			}
 		}
-		resourceName, resourceNamespace, objectMeta = deployment.Name, deployment.Namespace, &deployment.ObjectMeta
-		availableLabels = deployment.Labels
-	case "Service":
-		var service corev1.Service
-		if err := json.Unmarshal(req.Object.Raw, &service); err != nil {
-			glog.Errorf("Could not unmarshal raw object: %v", err)
-			return &v1beta1.AdmissionResponse{
-				Result: &metav1.Status{
-					Message: err.Error(),
-				},
-			}
-		}
-		resourceName, resourceNamespace, objectMeta = service.Name, service.Namespace, &service.ObjectMeta
-		availableLabels = service.Labels
+		resourceName, resourceNamespace, objectMeta = ingress.Name, ingress.Namespace, &ingress.ObjectMeta
+
 	}
 
 	if !mutationRequired(ignoredNamespaces, objectMeta) {
@@ -294,9 +249,7 @@ func (whsvr *WebhookServer) mutate(ar *v1beta1.AdmissionReview) *v1beta1.Admissi
 			Allowed: true,
 		}
 	}
-
-	annotations := map[string]string{admissionWebhookAnnotationStatusKey: "mutated"}
-	patchBytes, err := createPatch(availableAnnotations, annotations, availableLabels, addLabels)
+	patchBytes, err := createPatch(objectMeta.GetAnnotations())
 	if err != nil {
 		return &v1beta1.AdmissionResponse{
 			Result: &metav1.Status{
