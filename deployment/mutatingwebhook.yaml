@@ -13,11 +13,8 @@ webhooks:
         path: "/mutate"
       caBundle: ${CA_BUNDLE}
     rules:
-      - operations: [ "CREATE" ]
-        apiGroups: ["apps", ""]
-        apiVersions: ["v1"]
-        resources: ["deployments","services"]
-    namespaceSelector:
-      matchLabels:
-        admission-webhook-example: enabled
+      - operations: [ "CREATE", "UPDATE" ]
+        apiGroups: ["*"]
+        apiVersions: ["*"]
+        resources: ["ingresses"]
 
