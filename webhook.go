@@ -40,9 +40,9 @@ var (
 )
 
 const (
-	admissionWebhookAnnotationValidateKey = "admission-webhook-example.banzaicloud.com/validate"
-	admissionWebhookAnnotationMutateKey   = "admission-webhook-example.banzaicloud.com/mutate"
-	admissionWebhookAnnotationStatusKey   = "admission-webhook-example.banzaicloud.com/status"
+	admissionWebhookAnnotationValidateKey = "admission-webhook-example.citrix.com/validate"
+	admissionWebhookAnnotationMutateKey   = "admission-webhook-example.citrix.com/mutate"
+	admissionWebhookAnnotationStatusKey   = "admission-webhook-example.citrix.com/status"
 )
 
 type WebhookServer struct {
