@@ -1,7 +1,7 @@
 apiVersion: networking.k8s.io/v1beta1
 kind: Ingress
 metadata:
-  name: test-ingress
+  name: citrix-internal
   annotations:
           kubernetes.io/ingress.class: class1
 spec:

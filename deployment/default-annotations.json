@@ -1,0 +1,10 @@
+[
+    {  
+        "ingressName": "citrix-internal",
+        "defaultAnnotations": {"ingress.citrix.com/insecure-port":"80"}
+    },
+    {
+        "ingressName": "citrix-external",
+        "defaultAnnotations": {"ingress.citrix.com/insecure-port":"81"}
+    }
+]

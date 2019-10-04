@@ -46,15 +46,16 @@ const (
 )
 
 type WebhookServer struct {
-	server *http.Server
+	server             *http.Server
+	defaultAnnotations []map[string]interface{}
 }
 
 // Webhook Server parameters
 type WhSvrParameters struct {
-	port           int    // webhook server port
-	certFile       string // path to the x509 certificate for https
-	keyFile        string // path to the x509 private key matching `CertFile`
-	sidecarCfgFile string // path to sidecar injector configuration file
+	port          int    // webhook server port
+	certFile      string // path to the x509 certificate for https
+	keyFile       string // path to the x509 private key matching `CertFile`
+	annotationCfg string // path to annotation configuration file
 }
 
 type patchOperation struct {
@@ -82,12 +83,28 @@ func admissionRequired(ignoredList []string, admissionAnnotationKey string, meta
 	return true
 }
 
-func mutationRequired(ignoredList []string, metadata *metav1.ObjectMeta) bool {
+func mutationRequired(ignoredList []string, defaultAnnotations []map[string]interface{}, metadata *metav1.ObjectMeta) bool {
 	required := admissionRequired(ignoredList, admissionWebhookAnnotationMutateKey, metadata)
 	annotations := metadata.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
+	name := metadata.GetName()
+	ingressFound := false
+	for _, dflt := range defaultAnnotations {
+		ingressName, ok := dflt["ingressName"]
+		if !ok {
+			continue
+		}
+		glog.Infof("Checking default for %v/%v", ingressName.(string), metadata.Name)
+		if strings.Compare(strings.ToLower(ingressName.(string)), strings.ToLower(name)) == 0 {
+			ingressFound = true
+			break
+		}
+	}
+	required = required && ingressFound
+	glog.Infof("Mutation policy for %v/%v: required:%v", metadata.Namespace, metadata.Name, required)
+
 	status := annotations[admissionWebhookAnnotationStatusKey]
 
 	if strings.ToLower(status) == "mutated" {
@@ -104,18 +121,21 @@ func validationRequired(ignoredList []string, metadata *metav1.ObjectMeta) bool 
 	return required
 }
 
-func updateAnnotation(annotations map[string]string) (patch []patchOperation) {
-	for ann, val := range annotations {
-		if strings.Compare(strings.ToLower(ann), "kubernetes.io/ingress.class") == 0 {
-			if securePort, ok := ingressClassToSecurePortMap[strings.ToLower(val)]; ok {
-				annotations["ingress.citrix.com/secure-port"] = securePort
+func updateAnnotation(annotations map[string]string, defaultAnnotations map[string]interface{}) (patch []patchOperation) {
+	// for ann, val := range annotations {
+	// 	if strings.Compare(strings.ToLower(ann), "kubernetes.io/ingress.class") == 0 {
+	// 		if securePort, ok := ingressClassToSecurePortMap[strings.ToLower(val)]; ok {
+	// 			annotations["ingress.citrix.com/secure-port"] = securePort
 
-			}
-			if insecurePort, ok := ingressClassToInsecurePortMap[strings.ToLower(val)]; ok {
-				annotations["ingress.citrix.com/insecure-port"] = insecurePort
-			}
-			break
-		}
+	// 		}
+	// 		if insecurePort, ok := ingressClassToInsecurePortMap[strings.ToLower(val)]; ok {
+	// 			annotations["ingress.citrix.com/insecure-port"] = insecurePort
+	// 		}
+	// 		break
+	// 	}
+	// }
+	for ann, val := range defaultAnnotations {
+		annotations[ann] = val.(string)
 	}
 	patch = append(patch, patchOperation{
 		Op:    "add",
@@ -126,89 +146,23 @@ func updateAnnotation(annotations map[string]string) (patch []patchOperation) {
 	return patch
 }
 
-func createPatch(availableAnnotations map[string]string) ([]byte, error) {
+func createPatch(ingressName string, availableAnnotations map[string]string, allDefaultAnnotations []map[string]interface{}) ([]byte, error) {
 	var patch []patchOperation
 
-	patch = append(patch, updateAnnotation(availableAnnotations)...)
+	defaultAnnotationsForIngressName := map[string]interface{}{}
+	for _, dflt := range allDefaultAnnotations {
+		name, ok := dflt["ingressName"]
+		if !ok {
+			continue
+		}
+		ingressName := name.(string)
+		if strings.Compare(strings.ToLower(dflt["ingressName"].(string)), strings.ToLower(ingressName)) == 0 {
+			defaultAnnotationsForIngressName = dflt["defaultAnnotations"].(map[string]interface{})
+			break
+		}
+	}
+	patch = append(patch, updateAnnotation(availableAnnotations, defaultAnnotationsForIngressName)...)
 	return json.Marshal(patch)
-}
-
-// validate deployments and services
-func (whsvr *WebhookServer) validate(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	req := ar.Request
-	var (
-		objectMeta                      *metav1.ObjectMeta
-		resourceNamespace, resourceName string
-	)
-
-	glog.Infof("AdmissionReview for Kind=%v, Namespace=%v Name=%v (%v) UID=%v patchOperation=%v UserInfo=%v",
-		req.Kind, req.Namespace, req.Name, resourceName, req.UID, req.Operation, req.UserInfo)
-
-	switch req.Kind.Kind {
-	case "Ingress":
-		var ingress networkingv1beta1.Ingress
-		if err := json.Unmarshal(req.Object.Raw, &ingress); err != nil {
-			glog.Errorf("Could not unmarshal raw object: %v", err)
-			return &v1beta1.AdmissionResponse{
-				Result: &metav1.Status{
-					Message: err.Error(),
-				},
-			}
-		}
-		resourceName, resourceNamespace, objectMeta = ingress.Name, ingress.Namespace, &ingress.ObjectMeta
-	}
-
-	if !validationRequired(ignoredNamespaces, objectMeta) {
-		glog.Infof("Skipping validation for %s/%s due to policy check", resourceNamespace, resourceName)
-		return &v1beta1.AdmissionResponse{
-			Allowed: true,
-		}
-	}
-
-	allowed := true
-	var result *metav1.Status
-
-	annotations := objectMeta.GetAnnotations()
-	foundIngressClass := false
-	for ann, val := range annotations {
-		if strings.Compare(strings.ToLower(ann), "kubernetes.io/ingress.class") == 0 {
-			foundIngressClass = true
-			if _, ok := ingressClassToInsecurePortMap[strings.ToLower(val)]; ok {
-				break
-			} else if _, ok := ingressClassToSecurePortMap[strings.ToLower(val)]; ok {
-				break
-			} else {
-				allowed = false
-				result = &metav1.Status{
-					Reason: "Specified ingress class not found",
-				}
-				break
-			}
-		}
-	}
-	if foundIngressClass && allowed {
-		for ann := range annotations {
-			if strings.Compare(strings.ToLower(ann), "ingress.citrix.com/secure-port") == 0 {
-				allowed = false
-				result = &metav1.Status{
-					Reason: "Secure port specified when ingress class is specified",
-				}
-				break
-			}
-			if strings.Compare(strings.ToLower(ann), "ingress.citrix.com/insecure-port") == 0 {
-				allowed = false
-				result = &metav1.Status{
-					Reason: "Insecure port specified when ingress class is specified",
-				}
-				break
-			}
-		}
-	}
-
-	return &v1beta1.AdmissionResponse{
-		Allowed: allowed,
-		Result:  result,
-	}
 }
 
 // main mutation process
@@ -237,13 +191,13 @@ func (whsvr *WebhookServer) mutate(ar *v1beta1.AdmissionReview) *v1beta1.Admissi
 
 	}
 
-	if !mutationRequired(ignoredNamespaces, objectMeta) {
+	if !mutationRequired(ignoredNamespaces, whsvr.defaultAnnotations, objectMeta) {
 		glog.Infof("Skipping validation for %s/%s due to policy check", resourceNamespace, resourceName)
 		return &v1beta1.AdmissionResponse{
 			Allowed: true,
 		}
 	}
-	patchBytes, err := createPatch(objectMeta.GetAnnotations())
+	patchBytes, err := createPatch(resourceName, objectMeta.GetAnnotations(), whsvr.defaultAnnotations)
 	if err != nil {
 		return &v1beta1.AdmissionResponse{
 			Result: &metav1.Status{
@@ -299,7 +253,8 @@ func (whsvr *WebhookServer) serve(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/mutate" {
 			admissionResponse = whsvr.mutate(&ar)
 		} else if r.URL.Path == "/validate" {
-			admissionResponse = whsvr.validate(&ar)
+			//admissionResponse = whsvr.validate(&ar)
+			glog.Errorf("Not set up to do validation")
 		}
 	}
 

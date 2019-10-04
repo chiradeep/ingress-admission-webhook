@@ -28,7 +28,13 @@ spec:
             - name: webhook-certs
               mountPath: /etc/webhook/certs
               readOnly: true
+            - name: default-annotations
+              mountPath: /etc/config
+              readOnly: true
       volumes:
         - name: webhook-certs
           secret:
             secretName: admission-webhook-example-certs
+        - name: default-annotations
+          configMap:
+             name: default-annotations
