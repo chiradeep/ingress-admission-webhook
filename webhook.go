@@ -108,26 +108,20 @@ func updateAnnotation(annotations map[string]string) (patch []patchOperation) {
 	for ann, val := range annotations {
 		if strings.Compare(strings.ToLower(ann), "kubernetes.io/ingress.class") == 0 {
 			if securePort, ok := ingressClassToSecurePortMap[strings.ToLower(val)]; ok {
-				patch = append(patch, patchOperation{
-					Op:   "add",
-					Path: "/metadata/annotations",
-					Value: map[string]string{
-						"ingress.citrix.com/secure-port": securePort,
-					},
-				})
+				annotations["ingress.citrix.com/secure-port"] = securePort
+
 			}
 			if insecurePort, ok := ingressClassToInsecurePortMap[strings.ToLower(val)]; ok {
-				patch = append(patch, patchOperation{
-					Op:   "add",
-					Path: "/metadata/annotations",
-					Value: map[string]string{
-						"ingress.citrix.com/insecure-port": insecurePort,
-					},
-				})
+				annotations["ingress.citrix.com/insecure-port"] = insecurePort
 			}
 			break
 		}
 	}
+	patch = append(patch, patchOperation{
+		Op:    "add",
+		Path:  "/metadata/annotations",
+		Value: annotations,
+	})
 
 	return patch
 }
