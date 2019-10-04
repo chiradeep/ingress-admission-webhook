@@ -112,3 +112,5 @@ metadata:
 
 ```
 
+## Credits
+Code adapted from https://banzaicloud.com/blog/k8s-admission-webhooks/
