@@ -29,14 +29,6 @@ var (
 		metav1.NamespaceSystem,
 		metav1.NamespacePublic,
 	}
-	ingressClassToInsecurePortMap = map[string]string{
-		"class1": "81",
-		"class2": "82",
-	}
-	ingressClassToSecurePortMap = map[string]string{
-		"class1": "4443",
-		"class2": "4444",
-	}
 )
 
 const (
@@ -122,18 +114,7 @@ func validationRequired(ignoredList []string, metadata *metav1.ObjectMeta) bool 
 }
 
 func updateAnnotation(annotations map[string]string, defaultAnnotations map[string]interface{}) (patch []patchOperation) {
-	// for ann, val := range annotations {
-	// 	if strings.Compare(strings.ToLower(ann), "kubernetes.io/ingress.class") == 0 {
-	// 		if securePort, ok := ingressClassToSecurePortMap[strings.ToLower(val)]; ok {
-	// 			annotations["ingress.citrix.com/secure-port"] = securePort
 
-	// 		}
-	// 		if insecurePort, ok := ingressClassToInsecurePortMap[strings.ToLower(val)]; ok {
-	// 			annotations["ingress.citrix.com/insecure-port"] = insecurePort
-	// 		}
-	// 		break
-	// 	}
-	// }
 	for ann, val := range defaultAnnotations {
 		annotations[ann] = val.(string)
 	}
