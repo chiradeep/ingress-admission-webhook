@@ -136,7 +136,7 @@ func createPatch(ingressName string, availableAnnotations map[string]string, all
 		if !ok {
 			continue
 		}
-		ingressName := name.(string)
+		//ingressName := name.(string)
 		if strings.Compare(strings.ToLower(dflt["ingressName"].(string)), strings.ToLower(ingressName)) == 0 {
 			defaultAnnotationsForIngressName = dflt["defaultAnnotations"].(map[string]interface{})
 			break
